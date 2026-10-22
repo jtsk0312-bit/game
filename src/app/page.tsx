@@ -324,20 +324,7 @@ export default function BrickBreakerGame() {
     const formatted = formatTime(currentSeconds);
     const timestamp = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
 
-    // 1. Next.js 서버 API로 전송
-    try {
-      fetch("/api/scores", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: userName,
-          timeSeconds: currentSeconds,
-          timeFormatted: formatted,
-        }),
-      }).catch((e) => console.warn("API post error:", e));
-    } catch {}
-
-    // 2. 브라우저에서 직접 구글 시트로 전송 (CORS 프리플라이트 없는 no-cors 텍스트 전송으로 100% 보장)
+    // 구글 시트로 1회만 정확히 전송 (브라우저 직접 no-cors 전송)
     try {
       const scriptUrl = getGoogleScriptUrl();
       if (scriptUrl) {
@@ -351,7 +338,7 @@ export default function BrickBreakerGame() {
             finishtime: formatted,
             timeSeconds: currentSeconds,
           }),
-          mode: "no-cors", // 브라우저 CORS 보안 차단 우회 보장
+          mode: "no-cors",
         });
       }
     } catch (err) {
