@@ -2,7 +2,14 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 
+// 런타임을 Node.js로 명시
+export const dynamic = "force-dynamic";
+
 const DATA_FILE = path.join(process.cwd(), "leaderboard.json");
+
+// 하드코딩 기본 URL (Vercel 환경 변수가 등록되지 않아도 바로 작동하도록 기본값 제공)
+const DEFAULT_GOOGLE_SCRIPT_URL =
+  "https://script.google.com/macros/s/AKfycbxYvQZiKGNf5_qHKXAq8w_wf4W-ALFsWe0WfyJSc9lyWKYYrB4hlW6GBVOv3u4pj1Kf/exec";
 
 interface ScoreRecord {
   name: string;
@@ -18,24 +25,30 @@ function getLocalScores(): ScoreRecord[] {
       return JSON.parse(data);
     }
   } catch (e) {
-    console.error("Failed to read local scores", e);
+    // Vercel Serverless 환경에서는 읽기 전용 파일시스템일 수 있으므로 예외 무시
   }
   return [];
 }
 
 function saveLocalScore(record: ScoreRecord): ScoreRecord[] {
-  const scores = getLocalScores();
-  scores.push(record);
-  scores.sort((a, b) => a.timeSeconds - b.timeSeconds);
-  fs.writeFileSync(DATA_FILE, JSON.stringify(scores, null, 2), "utf-8");
-  return scores;
+  try {
+    const scores = getLocalScores();
+    scores.push(record);
+    scores.sort((a, b) => a.timeSeconds - b.timeSeconds);
+    if (fs.existsSync(DATA_FILE)) {
+      fs.writeFileSync(DATA_FILE, JSON.stringify(scores, null, 2), "utf-8");
+    }
+    return scores;
+  } catch (e) {
+    return [record];
+  }
 }
 
 function getGoogleScriptUrl() {
   return (
     process.env.NEXT_PUBLIC_GOOGLE_SCRIPT_URL ||
     process.env.GOOGLE_SHEET_MACRO_URL ||
-    ""
+    DEFAULT_GOOGLE_SCRIPT_URL
   ).trim();
 }
 
@@ -45,7 +58,6 @@ export async function GET() {
 
   if (scriptUrl) {
     try {
-      console.log("[API/scores] Fetching scores from Google Script:", scriptUrl);
       const res = await fetch(scriptUrl, {
         method: "GET",
         headers: { "Content-Type": "application/json" },
@@ -118,8 +130,7 @@ export async function POST(request: Request) {
       createdAt: timestamp,
     };
 
-    // 로컬 백업 저장
-    const updated = saveLocalScore(newRecord);
+    saveLocalScore(newRecord);
 
     const scriptUrl = getGoogleScriptUrl();
     let googleSyncSuccess = false;
@@ -127,8 +138,6 @@ export async function POST(request: Request) {
 
     if (scriptUrl) {
       try {
-        console.log("[API/scores] Sending score to Google Script:", scriptUrl);
-        // Apps Script doPost 처리: 단순 텍스트로도 안전하게 파싱되도록 문자열 전송
         const res = await fetch(scriptUrl, {
           method: "POST",
           headers: {
@@ -145,29 +154,23 @@ export async function POST(request: Request) {
         });
 
         const resText = await res.text();
-        console.log("[API/scores] Google response status:", res.status, "body:", resText);
         if (res.ok) {
           googleSyncSuccess = true;
         } else {
           googleError = `HTTP ${res.status}: ${resText}`;
         }
       } catch (err: any) {
-        console.error("[API/scores] Google Apps Script POST failed:", err);
         googleError = err.message || String(err);
       }
-    } else {
-      console.warn("[API/scores] NEXT_PUBLIC_GOOGLE_SCRIPT_URL is not set!");
     }
 
     return NextResponse.json({
       success: true,
-      topScores: updated.slice(0, 3),
       syncedWithGoogle: googleSyncSuccess,
       hasScriptUrl: Boolean(scriptUrl),
       googleError,
     });
   } catch (error) {
-    console.error("[API/scores] Server error:", error);
     return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }
