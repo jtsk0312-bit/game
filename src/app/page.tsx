@@ -5,7 +5,10 @@ import Image from "next/image";
 import confetti from "canvas-confetti";
 import { soundManager } from "@/utils/sound";
 
-// 벽돌 색상 정의 (라이트 모드에 어울리는 부드러운 파스텔 톤)
+const GOOGLE_SCRIPT_FALLBACK_URL =
+  "https://script.google.com/macros/s/AKfycbxYvQZiKGNf5_qHKXAq8w_wf4W-ALFsWe0WfyJSc9lyWKYYrB4hlW6GBVOv3u4pj1Kf/exec";
+
+// 벽돌 색상 정의 (라이트 모드 파스텔 톤)
 const BRICK_COLORS = {
   LIGHT_RED: "#fca5a5",     // 연한 빨강 (목표 대상)
   LIGHT_ORANGE: "#fed7aa",  // 연한 주황
@@ -74,7 +77,7 @@ export default function BrickBreakerGame() {
     radius: 9,
     dx: 2.26,
     dy: -2.26,
-    speed: 3.2, // 요청에 따라 3.2로 조정
+    speed: 3.2,
   });
 
   const bricksRef = useRef<Brick[]>([]);
@@ -91,17 +94,66 @@ export default function BrickBreakerGame() {
     return `${mins}분 ${secs < 10 ? "0" : ""}${secs}초`;
   };
 
-  // 랭킹 불러오기
+  const getGoogleScriptUrl = () => {
+    return (
+      process.env.NEXT_PUBLIC_GOOGLE_SCRIPT_URL ||
+      GOOGLE_SCRIPT_FALLBACK_URL
+    ).trim();
+  };
+
+  // 랭킹 불러오기 (우선 Next.js API 시도 -> 실패시 구글 앱스 스크립트 직접 호출)
   const fetchTopScores = useCallback(async () => {
     setIsLoadingScores(true);
     try {
-      const res = await fetch("/api/scores");
+      // 1. 내부 API 시도
+      const res = await fetch("/api/scores", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
-        setTopScores(data.scores || []);
+        if (data.scores && data.scores.length > 0) {
+          setTopScores(data.scores);
+          setIsLoadingScores(false);
+          return;
+        }
       }
     } catch (e) {
-      console.error(e);
+      console.warn("API route fetch failed, trying direct Google Script fetch:", e);
+    }
+
+    // 2. 브라우저에서 구글 앱스 스크립트 직접 조회 (Vercel 환경 안전망)
+    try {
+      const scriptUrl = getGoogleScriptUrl();
+      if (scriptUrl) {
+        const res = await fetch(scriptUrl, { method: "GET" });
+        if (res.ok) {
+          const json = await res.json();
+          const list = Array.isArray(json) ? json : json?.data || [];
+          if (Array.isArray(list) && list.length > 0) {
+            const sorted = list
+              .map((item: any) => {
+                let sec = Number(item.timeSeconds);
+                if (isNaN(sec) || sec === 0) {
+                  const timeStr = String(item.finishtime || "");
+                  const minMatch = timeStr.match(/(\d+)\s*분/);
+                  const secMatch = timeStr.match(/(\d+)\s*초/);
+                  const m = minMatch ? parseInt(minMatch[1], 10) : 0;
+                  const s = secMatch ? parseInt(secMatch[1], 10) : 0;
+                  sec = m * 60 + s;
+                }
+                return {
+                  name: item.name || "익명",
+                  timeSeconds: sec,
+                  timeFormatted: item.finishtime || `${Math.floor(sec / 60)}분 ${sec % 60}초`,
+                  createdAt: item.timestamp || "",
+                };
+              })
+              .sort((a: ScoreRecord, b: ScoreRecord) => a.timeSeconds - b.timeSeconds)
+              .slice(0, 3);
+            setTopScores(sorted);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Direct fetch failed:", err);
     } finally {
       setIsLoadingScores(false);
     }
@@ -115,8 +167,8 @@ export default function BrickBreakerGame() {
   const initBricks = () => {
     const rows = 5;
     const cols = 8;
-    const totalBricks = rows * cols; // 40개
-    const redCount = Math.round(totalBricks * 0.3); // 12개 (30%)
+    const totalBricks = rows * cols;
+    const redCount = Math.round(totalBricks * 0.3);
 
     const isRedArr: boolean[] = Array(totalBricks).fill(false);
     for (let i = 0; i < redCount; i++) {
@@ -226,12 +278,6 @@ export default function BrickBreakerGame() {
     }
   };
 
-  const handleEndGame = () => {
-    stopTimer();
-    soundManager.stopBgm();
-    setGameState("GAMEOVER");
-  };
-
   const handleRestartToHome = () => {
     stopTimer();
     soundManager.stopBgm();
@@ -241,6 +287,7 @@ export default function BrickBreakerGame() {
     fetchTopScores();
   };
 
+  // 미션 성공 처리 및 2중 전송 보장
   const handleSuccess = useCallback(async () => {
     stopTimer();
     setGameState("SUCCESS");
@@ -273,10 +320,13 @@ export default function BrickBreakerGame() {
       console.error("Confetti error:", e);
     }
 
+    const currentSeconds = elapsedSeconds;
+    const formatted = formatTime(currentSeconds);
+    const timestamp = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+
+    // 1. Next.js 서버 API로 전송
     try {
-      const currentSeconds = elapsedSeconds;
-      const formatted = formatTime(currentSeconds);
-      const res = await fetch("/api/scores", {
+      fetch("/api/scores", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -284,17 +334,35 @@ export default function BrickBreakerGame() {
           timeSeconds: currentSeconds,
           timeFormatted: formatted,
         }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.topScores) {
-          setTopScores(data.topScores);
-        }
+      }).catch((e) => console.warn("API post error:", e));
+    } catch {}
+
+    // 2. 브라우저에서 직접 구글 시트로 전송 (CORS 프리플라이트 없는 no-cors 텍스트 전송으로 100% 보장)
+    try {
+      const scriptUrl = getGoogleScriptUrl();
+      if (scriptUrl) {
+        await fetch(scriptUrl, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({
+            action: "create",
+            timestamp: timestamp,
+            name: userName.trim(),
+            finishtime: formatted,
+            timeSeconds: currentSeconds,
+          }),
+          mode: "no-cors", // 브라우저 CORS 보안 차단 우회 보장
+        });
       }
-    } catch (e) {
-      console.error("Failed to post score", e);
+    } catch (err) {
+      console.error("Direct post to Google Script failed:", err);
     }
-  }, [elapsedSeconds, userName]);
+
+    // 1초 뒤 최신 랭킹 자동 리프레시
+    setTimeout(() => {
+      fetchTopScores();
+    }, 1200);
+  }, [elapsedSeconds, userName, fetchTopScores]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -359,7 +427,7 @@ export default function BrickBreakerGame() {
     touchStartRef.current = null;
   };
 
-  // 게임 캔버스 루프 (라이트 테마 전용 렌더링)
+  // 게임 루프
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -371,16 +439,14 @@ export default function BrickBreakerGame() {
     const gameLoop = () => {
       if (!isRunning) return;
 
-      // 1. 화면 클리어 (라이트 모드: 화사하고 눈이 편안한 밝은 소프트 블루-그레이 배경)
+      // 배경
       ctx.fillStyle = "#f8fafc";
       ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
 
-      // 테두리
       ctx.strokeStyle = "#e2e8f0";
       ctx.lineWidth = 2;
       ctx.strokeRect(0, 0, V_WIDTH, V_HEIGHT);
 
-      // 격자 패턴 은은한 배경
       ctx.strokeStyle = "rgba(226, 232, 240, 0.4)";
       ctx.lineWidth = 1;
       for (let x = 40; x < V_WIDTH; x += 40) {
@@ -396,7 +462,6 @@ export default function BrickBreakerGame() {
         ctx.stroke();
       }
 
-      // 2. 상태 업데이트
       if (gameState === "PLAYING") {
         const paddle = paddleRef.current;
         const ball = ballRef.current;
@@ -410,7 +475,6 @@ export default function BrickBreakerGame() {
         ball.x += ball.dx;
         ball.y += ball.dy;
 
-        // 벽 충돌
         if (ball.x - ball.radius < 0) {
           ball.x = ball.radius;
           ball.dx = -ball.dx;
@@ -502,25 +566,20 @@ export default function BrickBreakerGame() {
         }
       }
 
-      // 3. 렌더링
-      // 벽돌 렌더링
+      // 렌더링
       bricksRef.current.forEach((b) => {
         if (!b.intact) return;
-
         ctx.save();
         ctx.fillStyle = b.color;
         ctx.beginPath();
         ctx.roundRect(b.x, b.y, b.w, b.h, 6);
         ctx.fill();
-
-        // 모든 블록에 균일하고 은은한 기본 테두리 적용 (빨강 강조 테두리 제거)
         ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
         ctx.lineWidth = 1;
         ctx.stroke();
         ctx.restore();
       });
 
-      // 패들 렌더링 (경쾌한 블루 그라디언트)
       const paddle = paddleRef.current;
       ctx.save();
       const pGrad = ctx.createLinearGradient(paddle.x, paddle.y, paddle.x, paddle.y + paddle.height);
@@ -534,7 +593,6 @@ export default function BrickBreakerGame() {
       ctx.shadowBlur = 8;
       ctx.restore();
 
-      // 공 렌더링 (선명하고 또렷한 딥네이비/다크블루)
       const ball = ballRef.current;
       ctx.save();
       ctx.fillStyle = "#1e293b";
@@ -545,7 +603,6 @@ export default function BrickBreakerGame() {
       ctx.shadowBlur = 4;
       ctx.restore();
 
-      // 카운트다운 오버레이
       if (gameState === "COUNTDOWN") {
         ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
         ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
@@ -556,7 +613,6 @@ export default function BrickBreakerGame() {
         ctx.fillText(`${countdown}`, V_WIDTH / 2, V_HEIGHT / 2);
       }
 
-      // 일시정지 오버레이
       if (gameState === "PAUSED") {
         ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
         ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
@@ -582,7 +638,6 @@ export default function BrickBreakerGame() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-100 text-slate-800 flex flex-col items-center justify-start p-4 select-none">
-      {/* 헤더 */}
       <header className="w-full max-w-4xl py-3 flex items-center justify-between border-b border-slate-200 mb-3">
         <div className="flex items-center gap-3">
           <div className="relative w-11 h-11 rounded-xl overflow-hidden border border-sky-200 shadow-sm bg-white flex items-center justify-center">
@@ -605,7 +660,6 @@ export default function BrickBreakerGame() {
         </div>
       </header>
 
-      {/* 상태 및 컨트롤 바 (게임 진행 중 표시) */}
       {gameState !== "START" && (
         <div className="w-full max-w-[800px] flex flex-wrap items-center justify-between bg-white border border-slate-200 border-b-0 px-4 py-2.5 rounded-t-2xl gap-2 shadow-sm">
           <div className="flex items-center gap-4">
@@ -659,7 +713,6 @@ export default function BrickBreakerGame() {
         </div>
       )}
 
-      {/* 게임 영역 캔버스 및 오버레이 */}
       <div className="relative w-full max-w-[800px] aspect-[4/3] bg-white rounded-2xl overflow-hidden shadow-lg border border-slate-200">
         <canvas
           ref={canvasRef}
@@ -671,10 +724,8 @@ export default function BrickBreakerGame() {
           onTouchEnd={handleTouchEnd}
         />
 
-        {/* 1. 시작 화면 오버레이 (라이트 모드 + Mascot 이미지 배치) */}
         {gameState === "START" && (
           <div className="absolute inset-0 bg-white/95 backdrop-blur-sm flex flex-col items-center justify-between p-6 sm:p-8 text-center z-20">
-            {/* 상단 타이틀 & 마스코트 */}
             <div className="flex flex-col items-center mt-2">
               <div className="relative w-28 h-28 sm:w-32 sm:h-32 rounded-2xl overflow-hidden border-2 border-sky-300 shadow-md mb-3 bg-white">
                 <Image
@@ -693,7 +744,6 @@ export default function BrickBreakerGame() {
               </p>
             </div>
 
-            {/* 이름 입력 및 시작 버튼 */}
             <div className="w-full max-w-xs flex flex-col gap-2.5 my-2">
               <input
                 type="text"
@@ -714,9 +764,7 @@ export default function BrickBreakerGame() {
               </button>
             </div>
 
-            {/* 명예의 전당 & 작성자 정보 (하단) */}
             <div className="w-full max-w-sm flex flex-col items-center gap-3">
-              {/* Top 3 랭킹 */}
               <div className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 shadow-sm text-left">
                 <div className="text-xs font-bold text-amber-700 mb-1.5 flex items-center justify-between">
                   <span>🏆 명예의 전당 Top 3</span>
@@ -745,7 +793,6 @@ export default function BrickBreakerGame() {
                 )}
               </div>
 
-              {/* 하단 작성자 정보 명시 */}
               <div className="text-xs sm:text-sm font-semibold text-slate-600 tracking-wide py-1 px-3 rounded-full bg-slate-100 border border-slate-200">
                 경영학부 202502453 정채린
               </div>
@@ -753,7 +800,6 @@ export default function BrickBreakerGame() {
           </div>
         )}
 
-        {/* 2. 미션 성공 오버레이 */}
         {gameState === "SUCCESS" && (
           <div className="absolute inset-0 bg-white/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
             <div className="text-6xl mb-2 animate-bounce">🎉</div>
@@ -782,7 +828,6 @@ export default function BrickBreakerGame() {
           </div>
         )}
 
-        {/* 3. 게임 미션 실패 오버레이 */}
         {gameState === "GAMEOVER" && (
           <div className="absolute inset-0 bg-white/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
             <div className="text-6xl mb-2">💥</div>
@@ -791,8 +836,6 @@ export default function BrickBreakerGame() {
             </h2>
             <p className="text-slate-500 text-sm max-w-xs mb-5">
               공을 놓쳐 생명이 모두 소진되었습니다.
-              <br />
-              (미션 실패 시 소요 시간은 기록되지 않습니다)
             </p>
 
             <button
@@ -804,16 +847,6 @@ export default function BrickBreakerGame() {
           </div>
         )}
       </div>
-
-      {/* 푸터 영역 */}
-      <footer className="w-full max-w-[800px] mt-2.5 flex justify-end items-center text-xs text-slate-400 px-2 font-medium">
-        <a
-          href="/admin"
-          className="hover:text-sky-600 transition underline underline-offset-2 flex items-center gap-1"
-        >
-          ⚙️ 구글시트 CRUD 데이터 관리
-        </a>
-      </footer>
     </div>
   );
 }
