@@ -2,9 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 
-// 런타임을 Node.js로 명시
-export const dynamic = "force-dynamic";
-
+// Next.js API 라우트
 const DATA_FILE = path.join(process.cwd(), "leaderboard.json");
 
 // 하드코딩 기본 URL (Vercel 환경 변수가 등록되지 않아도 바로 작동하도록 기본값 제공)
