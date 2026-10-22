@@ -806,6 +806,14 @@ export default function BrickBreakerGame() {
       </div>
 
       {/* 푸터 영역 */}
+      <footer className="w-full max-w-[800px] mt-2.5 flex justify-end items-center text-xs text-slate-400 px-2 font-medium">
+        <a
+          href="/admin"
+          className="hover:text-sky-600 transition underline underline-offset-2 flex items-center gap-1"
+        >
+          ⚙️ 구글시트 CRUD 데이터 관리
+        </a>
+      </footer>
     </div>
   );
 }
