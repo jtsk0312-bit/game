@@ -75,9 +75,9 @@ export default function BrickBreakerGame() {
     x: 400,
     y: 530,
     radius: 9,
-    dx: 2.26,
-    dy: -2.26,
-    speed: 3.2,
+    dx: 2.82,
+    dy: -2.82,
+    speed: 4.0, // 기존 3.2에서 4.0으로 기분 좋게 속도감 상향
   });
 
   const bricksRef = useRef<Brick[]>([]);
