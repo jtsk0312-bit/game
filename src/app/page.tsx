@@ -85,6 +85,7 @@ export default function BrickBreakerGame() {
   const livesRef = useRef(3);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
+  const lastTimeRef = useRef<number | null>(null);
   const touchStartRef = useRef<{ x: number; paddleX: number } | null>(null);
 
   // 시간 포맷 함수 (분:초 형식)
@@ -423,8 +424,17 @@ export default function BrickBreakerGame() {
 
     let isRunning = true;
 
-    const gameLoop = () => {
+    const gameLoop = (currentTime: number) => {
       if (!isRunning) return;
+
+      if (lastTimeRef.current === null) {
+        lastTimeRef.current = currentTime;
+      }
+      const rawDelta = (currentTime - lastTimeRef.current) / 1000;
+      lastTimeRef.current = currentTime;
+      // 60fps(1/60s) 기준 배율 계산 (기기 주사율이 60Hz, 120Hz, 가변이어도 항상 동일 속도 유지)
+      const dt = Math.min(Math.max(rawDelta, 0.001), 0.05);
+      const timeScale = dt / (1 / 60);
 
       // 배경
       ctx.fillStyle = "#f8fafc";
@@ -453,14 +463,14 @@ export default function BrickBreakerGame() {
         const paddle = paddleRef.current;
         const ball = ballRef.current;
 
-        paddle.x += paddle.dx;
+        paddle.x += paddle.dx * timeScale;
         if (paddle.x < 0) paddle.x = 0;
         if (paddle.x + paddle.width > V_WIDTH) {
           paddle.x = V_WIDTH - paddle.width;
         }
 
-        ball.x += ball.dx;
-        ball.y += ball.dy;
+        ball.x += ball.dx * timeScale;
+        ball.y += ball.dy * timeScale;
 
         if (ball.x - ball.radius < 0) {
           ball.x = ball.radius;
