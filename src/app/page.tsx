@@ -1,69 +1,811 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import Image from "next/image";
+import confetti from "canvas-confetti";
+import { soundManager } from "@/utils/sound";
+
+// 벽돌 색상 정의 (라이트 모드에 어울리는 부드러운 파스텔 톤)
+const BRICK_COLORS = {
+  LIGHT_RED: "#fca5a5",     // 연한 빨강 (목표 대상)
+  LIGHT_ORANGE: "#fed7aa",  // 연한 주황
+  LIGHT_YELLOW: "#fef08a",  // 연한 노랑
+  LIGHT_GREEN: "#bbf7d0",   // 연한 녹색
+  LIGHT_BLUE: "#bae6fd",    // 연한 파랑
+  LIGHT_PURPLE: "#e9d5ff",  // 연한 보라
+};
+
+const COLOR_KEYS = [
+  "LIGHT_ORANGE",
+  "LIGHT_YELLOW",
+  "LIGHT_GREEN",
+  "LIGHT_BLUE",
+  "LIGHT_PURPLE",
+] as const;
+
+interface Brick {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  color: string;
+  isRed: boolean;
+  intact: boolean;
+}
+
+interface ScoreRecord {
+  name: string;
+  timeSeconds: number;
+  timeFormatted: string;
+  createdAt?: string;
+}
+
+type GameState = "START" | "COUNTDOWN" | "PLAYING" | "PAUSED" | "SUCCESS" | "GAMEOVER";
+
+export default function BrickBreakerGame() {
+  const [userName, setUserName] = useState("");
+  const [gameState, setGameState] = useState<GameState>("START");
+  const [countdown, setCountdown] = useState<number>(3);
+  const [lives, setLives] = useState<number>(3);
+  const [redCleared, setRedCleared] = useState<number>(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+  const [topScores, setTopScores] = useState<ScoreRecord[]>([]);
+  const [isLoadingScores, setIsLoadingScores] = useState<boolean>(false);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // 게임 가상 해상도 기준
+  const V_WIDTH = 800;
+  const V_HEIGHT = 600;
+
+  // 패들 & 공 & 벽돌 상태 refs
+  const paddleRef = useRef({
+    x: 350,
+    y: 550,
+    width: 110,
+    height: 16,
+    speed: 8,
+    dx: 0,
+  });
+
+  const ballRef = useRef({
+    x: 400,
+    y: 530,
+    radius: 9,
+    dx: 2.26,
+    dy: -2.26,
+    speed: 3.2, // 요청에 따라 3.2로 조정
+  });
+
+  const bricksRef = useRef<Brick[]>([]);
+  const redClearedRef = useRef(0);
+  const livesRef = useRef(3);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const animFrameIdRef = useRef<number | null>(null);
+  const touchStartRef = useRef<{ x: number; paddleX: number } | null>(null);
+
+  // 시간 포맷 함수 (분:초 형식)
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}분 ${secs < 10 ? "0" : ""}${secs}초`;
+  };
+
+  // 랭킹 불러오기
+  const fetchTopScores = useCallback(async () => {
+    setIsLoadingScores(true);
+    try {
+      const res = await fetch("/api/scores");
+      if (res.ok) {
+        const data = await res.json();
+        setTopScores(data.scores || []);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingScores(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTopScores();
+  }, [fetchTopScores]);
+
+  // 벽돌 그리드 초기화 (5행 x 8열 = 40개, 30% 연한 빨강)
+  const initBricks = () => {
+    const rows = 5;
+    const cols = 8;
+    const totalBricks = rows * cols; // 40개
+    const redCount = Math.round(totalBricks * 0.3); // 12개 (30%)
+
+    const isRedArr: boolean[] = Array(totalBricks).fill(false);
+    for (let i = 0; i < redCount; i++) {
+      isRedArr[i] = true;
+    }
+    for (let i = isRedArr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [isRedArr[i], isRedArr[j]] = [isRedArr[j], isRedArr[i]];
+    }
+
+    const paddingX = 40;
+    const paddingTop = 50;
+    const brickSpacing = 10;
+    const brickWidth = (V_WIDTH - paddingX * 2 - brickSpacing * (cols - 1)) / cols;
+    const brickHeight = 24;
+
+    const newBricks: Brick[] = [];
+    let idx = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const isRed = isRedArr[idx++];
+        let color = BRICK_COLORS.LIGHT_RED;
+        if (!isRed) {
+          const randColorKey = COLOR_KEYS[Math.floor(Math.random() * COLOR_KEYS.length)];
+          color = BRICK_COLORS[randColorKey];
+        }
+
+        newBricks.push({
+          x: paddingX + c * (brickWidth + brickSpacing),
+          y: paddingTop + r * (brickHeight + brickSpacing),
+          w: brickWidth,
+          h: brickHeight,
+          color,
+          isRed,
+          intact: true,
+        });
+      }
+    }
+    bricksRef.current = newBricks;
+    redClearedRef.current = 0;
+    setRedCleared(0);
+  };
+
+  const resetBallAndPaddle = () => {
+    paddleRef.current.x = (V_WIDTH - paddleRef.current.width) / 2;
+    paddleRef.current.dx = 0;
+    ballRef.current.x = V_WIDTH / 2;
+    ballRef.current.y = paddleRef.current.y - 18;
+    const angle = (Math.random() * 0.4 - 0.2) + -Math.PI / 2;
+    const speed = ballRef.current.speed;
+    ballRef.current.dx = speed * Math.cos(angle);
+    ballRef.current.dy = speed * Math.sin(angle);
+  };
+
+  const handleStartGame = () => {
+    if (!userName.trim()) {
+      alert("사용자 이름을 입력해주세요!");
+      return;
+    }
+    livesRef.current = 3;
+    setLives(3);
+    setElapsedSeconds(0);
+    initBricks();
+    resetBallAndPaddle();
+
+    setGameState("COUNTDOWN");
+    setCountdown(3);
+
+    soundManager.startBgm();
+
+    let currentCount = 3;
+    const countTimer = setInterval(() => {
+      currentCount -= 1;
+      if (currentCount > 0) {
+        setCountdown(currentCount);
+      } else {
+        clearInterval(countTimer);
+        setGameState("PLAYING");
+        startTimer();
+      }
+    }, 1000);
+  };
+
+  const startTimer = () => {
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    timerIntervalRef.current = setInterval(() => {
+      setElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+  };
+
+  const stopTimer = () => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+  };
+
+  const handleTogglePause = () => {
+    if (gameState === "PLAYING") {
+      setGameState("PAUSED");
+      stopTimer();
+      soundManager.pauseBgm();
+    } else if (gameState === "PAUSED") {
+      setGameState("PLAYING");
+      startTimer();
+      soundManager.resumeBgm();
+    }
+  };
+
+  const handleEndGame = () => {
+    stopTimer();
+    soundManager.stopBgm();
+    setGameState("GAMEOVER");
+  };
+
+  const handleRestartToHome = () => {
+    stopTimer();
+    soundManager.stopBgm();
+    setGameState("START");
+    setElapsedSeconds(0);
+    setRedCleared(0);
+    fetchTopScores();
+  };
+
+  const handleSuccess = useCallback(async () => {
+    stopTimer();
+    setGameState("SUCCESS");
+    soundManager.stopBgm();
+    soundManager.playVictorySound();
+
+    try {
+      const end = Date.now() + 3 * 1000;
+      const colors = ["#f87171", "#38bdf8", "#34d399", "#fbbf24", "#c084fc"];
+      (function frame() {
+        confetti({
+          particleCount: 5,
+          angle: 60,
+          spread: 55,
+          origin: { x: 0 },
+          colors: colors,
+        });
+        confetti({
+          particleCount: 5,
+          angle: 120,
+          spread: 55,
+          origin: { x: 1 },
+          colors: colors,
+        });
+        if (Date.now() < end) {
+          requestAnimationFrame(frame);
+        }
+      })();
+    } catch (e) {
+      console.error("Confetti error:", e);
+    }
+
+    try {
+      const currentSeconds = elapsedSeconds;
+      const formatted = formatTime(currentSeconds);
+      const res = await fetch("/api/scores", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: userName,
+          timeSeconds: currentSeconds,
+          timeFormatted: formatted,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.topScores) {
+          setTopScores(data.topScores);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to post score", e);
+    }
+  }, [elapsedSeconds, userName]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft" || e.key === "Left") {
+        paddleRef.current.dx = -paddleRef.current.speed;
+      } else if (e.key === "ArrowRight" || e.key === "Right") {
+        paddleRef.current.dx = paddleRef.current.speed;
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (
+        (e.key === "ArrowLeft" || e.key === "Left") &&
+        paddleRef.current.dx < 0
+      ) {
+        paddleRef.current.dx = 0;
+      } else if (
+        (e.key === "ArrowRight" || e.key === "Right") &&
+        paddleRef.current.dx > 0
+      ) {
+        paddleRef.current.dx = 0;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length > 0) {
+      const touch = e.touches[0];
+      touchStartRef.current = {
+        x: touch.clientX,
+        paddleX: paddleRef.current.x,
+      };
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (!touchStartRef.current || e.touches.length === 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = V_WIDTH / rect.width;
+    const touch = e.touches[0];
+    const diffX = (touch.clientX - touchStartRef.current.x) * scaleX;
+
+    let newX = touchStartRef.current.paddleX + diffX;
+    if (newX < 0) newX = 0;
+    if (newX + paddleRef.current.width > V_WIDTH) {
+      newX = V_WIDTH - paddleRef.current.width;
+    }
+    paddleRef.current.x = newX;
+  };
+
+  const handleTouchEnd = () => {
+    touchStartRef.current = null;
+  };
+
+  // 게임 캔버스 루프 (라이트 테마 전용 렌더링)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let isRunning = true;
+
+    const gameLoop = () => {
+      if (!isRunning) return;
+
+      // 1. 화면 클리어 (라이트 모드: 화사하고 눈이 편안한 밝은 소프트 블루-그레이 배경)
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+
+      // 테두리
+      ctx.strokeStyle = "#e2e8f0";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(0, 0, V_WIDTH, V_HEIGHT);
+
+      // 격자 패턴 은은한 배경
+      ctx.strokeStyle = "rgba(226, 232, 240, 0.4)";
+      ctx.lineWidth = 1;
+      for (let x = 40; x < V_WIDTH; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, V_HEIGHT);
+        ctx.stroke();
+      }
+      for (let y = 40; y < V_HEIGHT; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(V_WIDTH, y);
+        ctx.stroke();
+      }
+
+      // 2. 상태 업데이트
+      if (gameState === "PLAYING") {
+        const paddle = paddleRef.current;
+        const ball = ballRef.current;
+
+        paddle.x += paddle.dx;
+        if (paddle.x < 0) paddle.x = 0;
+        if (paddle.x + paddle.width > V_WIDTH) {
+          paddle.x = V_WIDTH - paddle.width;
+        }
+
+        ball.x += ball.dx;
+        ball.y += ball.dy;
+
+        // 벽 충돌
+        if (ball.x - ball.radius < 0) {
+          ball.x = ball.radius;
+          ball.dx = -ball.dx;
+          soundManager.playPaddleSound();
+        } else if (ball.x + ball.radius > V_WIDTH) {
+          ball.x = V_WIDTH - ball.radius;
+          ball.dx = -ball.dx;
+          soundManager.playPaddleSound();
+        }
+
+        if (ball.y - ball.radius < 0) {
+          ball.y = ball.radius;
+          ball.dy = -ball.dy;
+          soundManager.playPaddleSound();
+        }
+
+        // 패들 충돌
+        if (
+          ball.y + ball.radius >= paddle.y &&
+          ball.y - ball.radius <= paddle.y + paddle.height &&
+          ball.x + ball.radius >= paddle.x &&
+          ball.x - ball.radius <= paddle.x + paddle.width &&
+          ball.dy > 0
+        ) {
+          const hitPos = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
+          const maxBounceAngle = Math.PI / 3;
+          const bounceAngle = hitPos * maxBounceAngle;
+
+          const currentSpeed = Math.sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
+          ball.dx = currentSpeed * Math.sin(bounceAngle);
+          ball.dy = -currentSpeed * Math.cos(bounceAngle);
+          ball.y = paddle.y - ball.radius;
+          soundManager.playPaddleSound();
+        }
+
+        // 블록 충돌
+        for (let i = 0; i < bricksRef.current.length; i++) {
+          const b = bricksRef.current[i];
+          if (!b.intact) continue;
+
+          const nearestX = Math.max(b.x, Math.min(ball.x, b.x + b.w));
+          const nearestY = Math.max(b.y, Math.min(ball.y, b.y + b.h));
+          const distX = ball.x - nearestX;
+          const distY = ball.y - nearestY;
+          const distance = Math.sqrt(distX * distX + distY * distY);
+
+          if (distance < ball.radius) {
+            b.intact = false;
+            soundManager.playHitSound(b.isRed);
+
+            const overlapX = ball.radius - Math.abs(distX);
+            const overlapY = ball.radius - Math.abs(distY);
+
+            if (overlapX < overlapY) {
+              ball.dx = -ball.dx;
+            } else {
+              ball.dy = -ball.dy;
+            }
+
+            if (b.isRed) {
+              redClearedRef.current += 1;
+              const newCleared = redClearedRef.current;
+              setRedCleared(newCleared);
+
+              if (newCleared >= 3) {
+                handleSuccess();
+                return;
+              }
+            }
+            break;
+          }
+        }
+
+        // 바닥 추락
+        if (ball.y - ball.radius > V_HEIGHT) {
+          soundManager.playLoseLifeSound();
+          livesRef.current -= 1;
+          const currentLives = livesRef.current;
+          setLives(currentLives);
+
+          if (currentLives <= 0) {
+            stopTimer();
+            soundManager.stopBgm();
+            setGameState("GAMEOVER");
+            return;
+          } else {
+            resetBallAndPaddle();
+          }
+        }
+      }
+
+      // 3. 렌더링
+      // 벽돌 렌더링
+      bricksRef.current.forEach((b) => {
+        if (!b.intact) return;
+
+        ctx.save();
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.roundRect(b.x, b.y, b.w, b.h, 6);
+        ctx.fill();
+
+        // 모든 블록에 균일하고 은은한 기본 테두리 적용 (빨강 강조 테두리 제거)
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+      });
+
+      // 패들 렌더링 (경쾌한 블루 그라디언트)
+      const paddle = paddleRef.current;
+      ctx.save();
+      const pGrad = ctx.createLinearGradient(paddle.x, paddle.y, paddle.x, paddle.y + paddle.height);
+      pGrad.addColorStop(0, "#0284c7");
+      pGrad.addColorStop(1, "#0369a1");
+      ctx.fillStyle = pGrad;
+      ctx.beginPath();
+      ctx.roundRect(paddle.x, paddle.y, paddle.width, paddle.height, 8);
+      ctx.fill();
+      ctx.shadowColor = "rgba(2, 132, 199, 0.35)";
+      ctx.shadowBlur = 8;
+      ctx.restore();
+
+      // 공 렌더링 (선명하고 또렷한 딥네이비/다크블루)
+      const ball = ballRef.current;
+      ctx.save();
+      ctx.fillStyle = "#1e293b";
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.25)";
+      ctx.shadowBlur = 4;
+      ctx.restore();
+
+      // 카운트다운 오버레이
+      if (gameState === "COUNTDOWN") {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+        ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+        ctx.font = "bold 84px sans-serif";
+        ctx.fillStyle = "#0284c7";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`${countdown}`, V_WIDTH / 2, V_HEIGHT / 2);
+      }
+
+      // 일시정지 오버레이
+      if (gameState === "PAUSED") {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+        ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+        ctx.font = "bold 36px sans-serif";
+        ctx.fillStyle = "#334155";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("⏸ 게임 일시 정지", V_WIDTH / 2, V_HEIGHT / 2);
+      }
+
+      animFrameIdRef.current = requestAnimationFrame(gameLoop);
+    };
+
+    animFrameIdRef.current = requestAnimationFrame(gameLoop);
+
+    return () => {
+      isRunning = false;
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+      }
+    };
+  }, [gameState, handleSuccess, countdown]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+    <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-100 text-slate-800 flex flex-col items-center justify-start p-4 select-none">
+      {/* 헤더 */}
+      <header className="w-full max-w-4xl py-3 flex items-center justify-between border-b border-slate-200 mb-3">
+        <div className="flex items-center gap-3">
+          <div className="relative w-11 h-11 rounded-xl overflow-hidden border border-sky-200 shadow-sm bg-white flex items-center justify-center">
             <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+              src="/Mascot.jpg"
+              alt="INU 마스코트"
+              fill
+              className="object-cover"
+              priority
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
+          <div>
+            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-sky-800 flex items-center gap-2">
+              INU 벽돌깨기
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 border border-sky-200">
+                인천대학교
+              </span>
+            </h1>
+          </div>
         </div>
-      </main>
+      </header>
+
+      {/* 상태 및 컨트롤 바 (게임 진행 중 표시) */}
+      {gameState !== "START" && (
+        <div className="w-full max-w-[800px] flex flex-wrap items-center justify-between bg-white border border-slate-200 border-b-0 px-4 py-2.5 rounded-t-2xl gap-2 shadow-sm">
+          <div className="flex items-center gap-4">
+            <span className="text-sm font-semibold text-slate-700">
+              플레이어: <span className="text-sky-600 font-bold">{userName}</span>
+            </span>
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-slate-500 font-medium mr-1">생명:</span>
+              {[...Array(3)].map((_, i) => (
+                <span
+                  key={i}
+                  className={`text-lg transition-transform ${
+                    i < lives ? "opacity-100 scale-100" : "opacity-20 scale-75 grayscale"
+                  }`}
+                >
+                  ❤️
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <div className="text-sm font-medium text-slate-700">
+              빨강 블록:{" "}
+              <span className="text-rose-500 font-extrabold text-base">
+                {redCleared}
+              </span>
+              <span className="text-slate-400"> / 3</span>
+            </div>
+            <div className="text-sm font-mono bg-sky-50 px-2.5 py-1 rounded-lg border border-sky-200 text-sky-800 font-bold">
+              ⏱ {formatTime(elapsedSeconds)}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {(gameState === "PLAYING" || gameState === "PAUSED") && (
+              <button
+                onClick={handleTogglePause}
+                className="px-3 py-1 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition"
+              >
+                {gameState === "PAUSED" ? "▶ 계속하기" : "⏸ 멈춤"}
+              </button>
+            )}
+            <button
+              onClick={handleRestartToHome}
+              className="px-3 py-1 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition"
+            >
+              다시 시작
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 게임 영역 캔버스 및 오버레이 */}
+      <div className="relative w-full max-w-[800px] aspect-[4/3] bg-white rounded-2xl overflow-hidden shadow-lg border border-slate-200">
+        <canvas
+          ref={canvasRef}
+          width={V_WIDTH}
+          height={V_HEIGHT}
+          className="w-full h-full block touch-none"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        />
+
+        {/* 1. 시작 화면 오버레이 (라이트 모드 + Mascot 이미지 배치) */}
+        {gameState === "START" && (
+          <div className="absolute inset-0 bg-white/95 backdrop-blur-sm flex flex-col items-center justify-between p-6 sm:p-8 text-center z-20">
+            {/* 상단 타이틀 & 마스코트 */}
+            <div className="flex flex-col items-center mt-2">
+              <div className="relative w-28 h-28 sm:w-32 sm:h-32 rounded-2xl overflow-hidden border-2 border-sky-300 shadow-md mb-3 bg-white">
+                <Image
+                  src="/Mascot.jpg"
+                  alt="INU 마스코트"
+                  fill
+                  className="object-contain p-1"
+                  priority
+                />
+              </div>
+              <h2 className="text-2xl sm:text-3xl font-black text-sky-900 mb-1">
+                INU 벽돌깨기 챌린지
+              </h2>
+              <p className="text-slate-600 text-xs sm:text-sm max-w-md leading-relaxed">
+                파스텔 블록 속에 숨어있는 <span className="text-rose-500 font-bold">연한 빨강 블록 3개</span>를 타격하세요!
+              </p>
+            </div>
+
+            {/* 이름 입력 및 시작 버튼 */}
+            <div className="w-full max-w-xs flex flex-col gap-2.5 my-2">
+              <input
+                type="text"
+                placeholder="플레이어 이름을 입력하세요"
+                value={userName}
+                onChange={(e) => setUserName(e.target.value)}
+                maxLength={12}
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500 text-center font-semibold text-sm shadow-inner"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleStartGame();
+                }}
+              />
+              <button
+                onClick={handleStartGame}
+                className="w-full py-3 px-6 rounded-xl font-bold text-sm bg-sky-600 hover:bg-sky-500 text-white shadow-md shadow-sky-500/30 transition active:scale-95 flex items-center justify-center gap-2"
+              >
+                🎮 게임 시작하기
+              </button>
+            </div>
+
+            {/* 명예의 전당 & 작성자 정보 (하단) */}
+            <div className="w-full max-w-sm flex flex-col items-center gap-3">
+              {/* Top 3 랭킹 */}
+              <div className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 shadow-sm text-left">
+                <div className="text-xs font-bold text-amber-700 mb-1.5 flex items-center justify-between">
+                  <span>🏆 명예의 전당 Top 3</span>
+                  <span className="text-[11px] font-normal text-slate-400">클리어 소요 시간</span>
+                </div>
+                {isLoadingScores ? (
+                  <div className="text-xs text-slate-400 text-center py-1">불러오는 중...</div>
+                ) : topScores.length === 0 ? (
+                  <div className="text-xs text-slate-400 text-center py-1">첫 번째 주인공이 되어보세요!</div>
+                ) : (
+                  <div className="space-y-1">
+                    {topScores.map((score, idx) => (
+                      <div
+                        key={idx}
+                        className="flex justify-between items-center text-xs py-1 px-2.5 rounded-lg bg-white border border-slate-100 font-medium"
+                      >
+                        <span className="text-slate-700">
+                          {idx === 0 ? "🥇" : idx === 1 ? "🥈" : "🥉"} {score.name}
+                        </span>
+                        <span className="font-mono text-sky-700 font-bold">
+                          {score.timeFormatted}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* 하단 작성자 정보 명시 */}
+              <div className="text-xs sm:text-sm font-semibold text-slate-600 tracking-wide py-1 px-3 rounded-full bg-slate-100 border border-slate-200">
+                경영학부 202502453 정채린
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. 미션 성공 오버레이 */}
+        {gameState === "SUCCESS" && (
+          <div className="absolute inset-0 bg-white/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
+            <div className="text-6xl mb-2 animate-bounce">🎉</div>
+            <h2 className="text-3xl font-black text-sky-800 mb-1">
+              미션 성공!
+            </h2>
+            <p className="text-slate-600 text-sm mb-4">
+              연한 빨강 블록 3개를 완벽하게 제거했습니다!
+            </p>
+
+            <div className="bg-sky-50 border border-sky-200 rounded-2xl p-5 mb-5 w-full max-w-xs shadow-sm">
+              <div className="text-xs font-medium text-slate-500 mb-1">플레이어</div>
+              <div className="text-lg font-bold text-sky-800 mb-2">{userName}</div>
+              <div className="text-xs font-medium text-slate-500 mb-1">클리어 완료 시간</div>
+              <div className="text-2xl font-mono font-extrabold text-sky-600">
+                {formatTime(elapsedSeconds)}
+              </div>
+            </div>
+
+            <button
+              onClick={handleRestartToHome}
+              className="py-3 px-6 rounded-xl font-bold text-sm bg-sky-600 hover:bg-sky-500 text-white shadow-md transition active:scale-95"
+            >
+              다시 시작 (이름 변경)
+            </button>
+          </div>
+        )}
+
+        {/* 3. 게임 미션 실패 오버레이 */}
+        {gameState === "GAMEOVER" && (
+          <div className="absolute inset-0 bg-white/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
+            <div className="text-6xl mb-2">💥</div>
+            <h2 className="text-3xl font-black text-rose-600 mb-1">
+              게임 미션 실패
+            </h2>
+            <p className="text-slate-500 text-sm max-w-xs mb-5">
+              공을 놓쳐 생명이 모두 소진되었습니다.
+              <br />
+              (미션 실패 시 소요 시간은 기록되지 않습니다)
+            </p>
+
+            <button
+              onClick={handleRestartToHome}
+              className="py-3 px-6 rounded-xl font-bold text-sm bg-slate-800 hover:bg-slate-700 text-white shadow-md transition active:scale-95"
+            >
+              다시 시작 (이름 변경)
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* 푸터 영역 */}
     </div>
   );
 }
